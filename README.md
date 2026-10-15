@@ -730,6 +730,10 @@ Developed by [@dtechterminal](https://github.com/dtechterminal)
 
 ## Changelog
 
+### v1.4.2
+- Implemented `RestoreEntity` for Smart Plug switches to retain state across Home Assistant restarts
+- Added power draw state inference from `plugMetering` telemetry to dynamically detect active switch state and resolve state desync
+
 ### v1.4.1
 - Improved documentation with detailed TLS/SSL setup instructions
 - Added comprehensive Mosquitto TLS configuration guide

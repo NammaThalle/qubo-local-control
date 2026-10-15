@@ -11,6 +11,8 @@ from homeassistant.config_entries import ConfigEntry
 from homeassistant.core import HomeAssistant, callback
 from homeassistant.helpers.entity_platform import AddEntitiesCallback
 
+from homeassistant.helpers.restore_state import RestoreEntity
+
 from .const import (
     CONF_DEVICE_TYPE,
     CONF_DEVICE_UUID,
@@ -20,6 +22,7 @@ from .const import (
     DOMAIN,
     ENTITY_SWITCH,
     TOPIC_CONTROL_SWITCH,
+    TOPIC_MONITOR_ENERGY,
     TOPIC_MONITOR_SWITCH,
 )
 
@@ -43,7 +46,7 @@ async def async_setup_entry(
     async_add_entities([QuboSwitch(hass, config_entry, device_info, config)])
 
 
-class QuboSwitch(SwitchEntity):
+class QuboSwitch(SwitchEntity, RestoreEntity):
     """Representation of a QUBO Smart Plug switch."""
 
     _attr_has_entity_name = True
@@ -76,13 +79,25 @@ class QuboSwitch(SwitchEntity):
         self._monitor_topic = TOPIC_MONITOR_SWITCH.format(
             unit_uuid=self._unit_uuid, device_uuid=self._device_uuid
         )
+        self._energy_topic = TOPIC_MONITOR_ENERGY.format(
+            unit_uuid=self._unit_uuid, device_uuid=self._device_uuid
+        )
 
     async def async_added_to_hass(self) -> None:
-        """Subscribe to MQTT topics when added to hass."""
+        """Subscribe to MQTT topics and restore state when added to hass."""
+        await super().async_added_to_hass()
+
+        # Restore previous state across Home Assistant restarts
+        last_state = await self.async_get_last_state()
+        if last_state is not None and last_state.state in ("on", "off"):
+            self._attr_is_on = (last_state.state == "on")
+            _LOGGER.debug(
+                "Restored %s switch state: %s", self._device_uuid, self._attr_is_on
+            )
 
         @callback
         def message_received(msg):
-            """Handle new MQTT messages."""
+            """Handle explicit switch state change events from MQTT."""
             try:
                 payload = json.loads(msg.payload)
                 _LOGGER.debug("Received switch state: %s", payload)
@@ -103,8 +118,46 @@ class QuboSwitch(SwitchEntity):
             except (json.JSONDecodeError, KeyError) as err:
                 _LOGGER.error("Error processing switch state: %s", err)
 
-        # Subscribe to monitor topic
+        @callback
+        def energy_received(msg):
+            """Infer active switch state from live power consumption telemetry."""
+            try:
+                payload = json.loads(msg.payload)
+                devices = payload.get("devices", {})
+                services = devices.get("services", {})
+                metering = services.get("plugMetering", {})
+                events = metering.get("events", {})
+                state_changed = events.get("stateChanged", {})
+
+                power_val = state_changed.get("power")
+                current_val = state_changed.get("current")
+
+                # If the device is actively drawing wattage or current, the relay must physically be ON
+                if power_val is not None and float(power_val) > 1.0:
+                    if not self._attr_is_on:
+                        self._attr_is_on = True
+                        self.async_write_ha_state()
+                        _LOGGER.debug(
+                            "Inferred switch ON from active power draw (%.2f W) for %s",
+                            float(power_val),
+                            self._device_uuid,
+                        )
+                elif current_val is not None and float(current_val) > 50.0:
+                    if not self._attr_is_on:
+                        self._attr_is_on = True
+                        self.async_write_ha_state()
+                        _LOGGER.debug(
+                            "Inferred switch ON from active current draw (%.1f mA) for %s",
+                            float(current_val),
+                            self._device_uuid,
+                        )
+
+            except (json.JSONDecodeError, KeyError, ValueError) as err:
+                _LOGGER.debug("Error processing energy telemetry for switch state: %s", err)
+
+        # Subscribe to monitor topics
         await mqtt.async_subscribe(self.hass, self._monitor_topic, message_received, 1)
+        await mqtt.async_subscribe(self.hass, self._energy_topic, energy_received, 1)
 
     async def async_turn_on(self, **kwargs: Any) -> None:
         """Turn the switch on."""
