@@ -152,7 +152,7 @@ class QuboSwitch(SwitchEntity, RestoreEntity):
                             self._device_uuid,
                         )
 
-            except (json.JSONDecodeError, KeyError, ValueError) as err:
+            except (json.JSONDecodeError, KeyError, ValueError, AttributeError) as err:
                 _LOGGER.debug("Error processing energy telemetry for switch state: %s", err)
 
         # Subscribe to monitor topics
